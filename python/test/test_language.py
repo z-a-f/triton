@@ -324,6 +324,51 @@ def test_cast(dtype_x, dtype_z, bitcast, device='cuda'):
     assert z_tri == z_ref
 
 
+# -------------------
+# test reduction
+# -------------------
+
+@pytest.mark.parametrize('op, size, num_warps, dim, dtype_x', [
+    (op, size, num_warps, 0, dtype)
+    for op in ['add', 'min', 'max']\
+    for (size, num_warps) in [(128, 4),  (32, 32), (128, 8), (64, 16), (512, 4)]
+    for dtype in ['float16', 'float32']
+])
+def test_reduction(op, size, num_warps, dim, dtype_x, device='cuda'):
+    x = triton.testing.random(1024, dtype=cvt[dtype_x], device=device)
+    x[size:] = 100
+
+    # triton kernel
+    @triton.jit
+    def kernel(X, Z, **meta):
+        off = tl.arange(0, meta['BLOCK'])
+        x = tl.load(X + off)
+        z = GENERATE_TEST_HERE
+        tl.store(Z + off, z)
+
+    triton_op = {'add': 'sum', 'max': 'max', 'min': 'min'}[op]
+    kernel = patch_kernel(kernel, {'GENERATE_TEST_HERE': f'tl.{triton_op}(x, dim={dim})'})
+
+    # triton result
+    z_tri = torch.empty(1024, dtype=cvt[dtype_x], device=device)
+    pgm = kernel[(1, )](x, z_tri, BLOCK=size)
+
+    # torch result
+    torch_op = {'add': torch.sum, 'max': torch.max, 'min': torch.min}[op]
+    z_ref = torch_op(x[:size])
+    exact = op not in ['add']
+    #print(z_ref)
+    #print(z_tri)
+    if (op, size, num_warps, dtype_x) == ('max', 64, 16, 'float32'):
+        print(x)
+        print(z_ref)
+        print(pgm.asm('ptx'))
+    if exact:
+        assert z_ref.item() == z_tri[0].item()
+    else:
+        triton.testing.assert_allclose(z_ref, z_tri[0])
+
+
 # ---------------
 # test load
 # ---------------
