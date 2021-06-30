@@ -24,6 +24,7 @@ jobs:
       displayName: Patch setup.py
     - bash: |
         export CIBW_BEFORE_BUILD="pip install cmake"
+        export CIBW_BUILD="cp37-macosx_x86_64"
         python3 -m cibuildwheel python --output-dir wheelhouse
       displayName: Build wheels
     - task: PublishBuildArtifacts@1
