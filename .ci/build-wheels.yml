@@ -20,10 +20,10 @@ jobs:
         sed -i -r "s/version\=\"(.*)\"/version=\"\1-dev"$LATEST_DATE"\"/g" python/setup.py
         echo "" >> python/setup.cfg
         echo "[build_ext]" >> python/setup.cfg
-        echo "base-dir=../" >> python/setup.cfg
+        echo "base-dir=/tmp/triton/" >> python/setup.cfg
       displayName: Patch setup.py
     - bash: |
-        export CIBW_BEFORE_BUILD="pip install cmake"
+        export CIBW_BEFORE_BUILD="pip install cmake; git clone https://github.com/ptillet/triton.git /tmp/triton"
         export CIBW_BUILD="cp37-macosx_x86_64"
         python3 -m cibuildwheel python --output-dir wheelhouse
       displayName: Build wheels
