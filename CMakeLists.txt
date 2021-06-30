@@ -90,5 +90,10 @@ add_library(triton SHARED ${LIBTRITON_SRC} ${PYTHON_SRC})
 target_link_libraries(triton ${LLVM_LIBRARIES})
 
 if(BUILD_PYTHON_MODULE)
-    target_link_libraries(triton ${TORCH_LIBRARIES} ${CUTLASS_LIBRARIES})
+    set(CMAKE_SHARED_LIBRARY_SUFFIX ".so")
+    # Check if the platform is MacOS
+    if(APPLE)
+        set(PYTHON_LDFLAGS "-undefined dynamic_lookup -flto=thin")
+    endif()
+    target_link_libraries(triton ${CUTLASS_LIBRARIES} ${PYTHON_LDFLAGS})
 endif()
