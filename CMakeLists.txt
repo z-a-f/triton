@@ -25,6 +25,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS -fvisibility=default -std=gnu++17")
 
 
+if(APPLE)
+    set(CMAKE_OSX_SYSROOT "/")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "")
+endif()
 
 ##########
 # LLVM
