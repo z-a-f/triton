@@ -38,7 +38,9 @@ set(LLVM_FIND_COMPONENTS "all")
 find_package(LLVM 11 REQUIRED)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 include_directories("${LLVM_INCLUDE_DIRS}")
-add_definitions(-D__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__=0)
+if(APPLE)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "10.12")
+endif()
 
 # Python module
 if(BUILD_PYTHON_MODULE)
