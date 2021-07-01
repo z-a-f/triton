@@ -5,7 +5,7 @@ jobs:
 
 - job: macos
   timeoutInMinutes: 180
-  pool: {vmImage: 'macOS-latest'}
+  pool: {vmImage: 'macOS-10.12'}
   steps:
     - bash: |
         set -o errexit
