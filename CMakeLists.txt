@@ -35,7 +35,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -std=gnu++17")
 # LLVM
 ##########
 set(LLVM_FIND_COMPONENTS "all")
-find_package(LLVM REQUIRED)
+find_package(LLVM 11 REQUIRED)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 include_directories("${LLVM_INCLUDE_DIRS}")
 
