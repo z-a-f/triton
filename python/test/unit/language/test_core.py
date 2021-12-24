@@ -495,21 +495,25 @@ def test_permute(dtype, shape, perm, device='cuda'):
 # test dot
 # ---------------
 
-@pytest.mark.parametrize("epilogue", ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols'])
+@pytest.mark.parametrize("epilogue", ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot'])
 def test_dot(epilogue, dtype=torch.float32, device='cuda'):
     torch.manual_seed(0)
     # triton kernel
     @triton.jit
     def kernel(X, stride_xm, stride_xk, 
                Y, stride_yk, stride_yn,
+               W, stride_wn, stride_wl,
                Z, stride_zm, stride_zn, 
                BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-               ADD_MATRIX: tl.constexpr, ADD_ROWS: tl.constexpr, ADD_COLS: tl.constexpr):
+               ADD_MATRIX: tl.constexpr, ADD_ROWS: tl.constexpr, ADD_COLS: tl.constexpr,
+               DO_SOFTMAX: tl.constexpr, CHAIN_DOT: tl.constexpr):
         off_m = tl.arange(0, BLOCK_M)
         off_n = tl.arange(0, BLOCK_N)
+        off_l = tl.arange(0, BLOCK_N)
         off_k = tl.arange(0, BLOCK_K)
         Xs = X + off_m[:, None] * stride_xm + off_k[None, :] * stride_xk
         Ys = Y + off_k[:, None] * stride_yk + off_n[None, :] * stride_yn
+        Ws = W + off_n[:, None] * stride_wn + off_l[None, :] * stride_wl
         Zs = Z + off_m[:, None] * stride_zm + off_n[None, :] * stride_zn
         z = tl.dot(tl.load(Xs), tl.load(Ys))
         if ADD_MATRIX:
@@ -520,11 +524,25 @@ def test_dot(epilogue, dtype=torch.float32, device='cuda'):
         if ADD_COLS:
             ZCs = Z + off_n * stride_zn 
             z += tl.load(ZCs)[None, :]
+        if DO_SOFTMAX:
+            max = tl.max(z, 1)
+            z = z - max[:, None]
+            num = tl.exp(z)
+            den = tl.sum(num, 1)
+            z = num / den[:, None]
+        if CHAIN_DOT:
+            tl.store(Zs, z)
+            tl.debug_barrier()
+            z = tl.dot(tl.load(Zs), tl.load(Ws))
         tl.store(Zs, z)
     # input
-    M, N, K = 64, 64, 32
-    x = triton.testing.random((M, K), dtype=dtype, device=device)
+    M, N, K = 16, 16, 16
+    x = triton.testing.random((M, K), dtype=dtype, device=device).T
     y = triton.testing.random((K, N), dtype=dtype, device=device)
+    w = triton.testing.random((N, N), dtype=dtype, device=device)
+    w[:] = 1
+    x[:] = 2
+    y[:] = 1
     # triton result
     z = triton.testing.random((M, N), dtype=dtype, device=device)
     z_tri = z.clone()
@@ -532,11 +550,14 @@ def test_dot(epilogue, dtype=torch.float32, device='cuda'):
         z_tri = torch.as_strided(z_tri, (M, N), z_tri.stride()[::-1])
     pgm = kernel[(1, 1)](x, x.stride(0), x.stride(1),
                          y, y.stride(0), y.stride(1),
+                         w, w.stride(0), w.stride(1),
                          z_tri, z_tri.stride(0), z_tri.stride(1),
                          BLOCK_M=M, BLOCK_K=K, BLOCK_N=N,
                          ADD_MATRIX = epilogue=='add-matrix',
                          ADD_ROWS = epilogue=='add-rows',
-                         ADD_COLS = epilogue=='add-cols')
+                         ADD_COLS = epilogue=='add-cols',
+                         DO_SOFTMAX = epilogue=='softmax',
+                         CHAIN_DOT = epilogue=='chain-dot')
     # torch result
     z_ref = torch.matmul(x.float(), y.float())
     if epilogue == 'add-matrix':
@@ -545,7 +566,13 @@ def test_dot(epilogue, dtype=torch.float32, device='cuda'):
         z_ref += z[:,0][:, None]
     if epilogue == 'add-cols':
         z_ref += z[0,:][None, :]
+    if epilogue == 'softmax':
+        z_ref = torch.softmax(z_ref, axis=-1)
+    if epilogue == 'chain-dot':
+        z_ref = torch.matmul(z_ref.half().float(), w.float())
     z_ref = z_ref.to(torch.float16)
+    print(pgm.asm['ptx'])
+    print(pgm.asm['ttir'])
     # compare
     triton.testing.assert_almost_equal(z_tri, z_ref)
     # make sure ld/st are vectorized

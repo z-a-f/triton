@@ -4,6 +4,7 @@
 #include "triton/codegen/analysis/allocation.h"
 #include "triton/codegen/analysis/liveness.h"
 #include "triton/ir/utils.h"
+#include "triton/ir/instructions.h"
 
 namespace triton{
 namespace codegen{
@@ -89,6 +90,8 @@ void allocation::run(ir::module &mod) {
     for(shared_layout* y: interferences[x])
       Adj = std::max<unsigned>(Adj, starts[y] + y->get_size());
     offsets_[x] = starts[x] + colors[x] * Adj;
+    ((ir::instruction*)(x->get_values()[0]))->print(std::cout);
+    std::cout << " " << offsets_[x] << std::endl;;
   }
   // Save maximum size of induced memory space
   allocated_size_ = 0;

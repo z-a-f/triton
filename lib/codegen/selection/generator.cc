@@ -1640,6 +1640,7 @@ void generator::visit_fmadot(ir::dot_inst* C, ir::value* A, ir::value* B, ir::va
 //    off_a0i = mul(off_a0i, i32(vec_a));
     off_a[i] = add(mul(off_a0, i32(stride_a0)), mul(off_a1, i32(stride_a1)));
   }
+  std::cout << stride_a0 << " " << stride_a1 << std::endl;
   Value* off_b0 = is_b_row ? mul(ax_n.thread_id, i32(ax_n.contiguous)): i32(0);
   Value* off_b1 = is_b_row ? i32(0) : mul(ax_n.thread_id, i32(ax_n.contiguous));
   std::vector<Value*> off_b(num_ptr_b);
@@ -1660,6 +1661,7 @@ void generator::visit_fmadot(ir::dot_inst* C, ir::value* A, ir::value* B, ir::va
   std::map<indices_t, Value*> ret = vals_[D];
   std::map<std::pair<int, int>, Value*> has, hbs;
   auto ord = layout_c->get_order();
+  std::cout << "ORDER: " << " " << ord[0] << " " <<ord[1] << std::endl;
   for(unsigned k = 0; k < NK; k++){
     int z = 0;
     for(unsigned i = 0; i < shape_c[ord[1]]; i += layout_c->shape_per_cta(ord[1]))
