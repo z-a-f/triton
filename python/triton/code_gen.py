@@ -934,6 +934,7 @@ class JITFunction:
     cache_hook = None
 
     def __init__(self, fn, version=None, do_not_specialize=None):
+        from .language import constexpr, dtype
         # information of wrapped function
         self.fn = fn
         self.module = fn.__module__
@@ -954,7 +955,13 @@ class JITFunction:
         self.kernel_decorators = []
         self.kernel = None
         # annotations
-        self.annotations = {self.arg_names.index(name): ty for name, ty in fn.__annotations__.items()}
+        self.annotations = dict()
+        for name, ty in fn.__annotations__.items():
+            idx = self.arg_names.index(name)
+            if ty is not constexpr  and not issubclass(ty, dtype):
+              raise RuntimeError(f"unsupported annotation {ty} for argument {name} at position {idx}."
+                                  "Only constexpr and subclasses of triton.language.dtype are supported.")
+            self.annotations[idx] = ty
         self.__annotations__ = fn.__annotations__
         # forward docs
         self.__doc__ = fn.__doc__
