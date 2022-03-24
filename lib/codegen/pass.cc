@@ -60,15 +60,20 @@ std::unique_ptr<llvm::Module> add_passes_to_emit_bin(ir::module &ir, llvm::LLVMC
   layouts.run(ir);
   peephole.run(ir);
   dce.run(ir);
+  std::cout << 0 << std::endl;
   if (target->is_gpu())
     cts.run(ir);
   align.run(ir);
   axes.run(ir);
+  std::cout << 1 << std::endl;
   layouts.run(ir);
+  std::cout << 1 << std::endl;
   coalesce.run(ir);
+  std::cout << 2 << std::endl;
   dce.run(ir);
   align.run(ir);
   dce.run(ir);
+  std::cout << 1 << std::endl;
   if (target->is_gpu())
     cts.run(ir);
   dce.run(ir);
@@ -77,6 +82,7 @@ std::unique_ptr<llvm::Module> add_passes_to_emit_bin(ir::module &ir, llvm::LLVMC
   layouts.run(ir);
   peephole.run(ir);
   dce.run(ir);
+  std::cout << 2 << std::endl;
   align.run(ir);
   axes.run(ir);
   layouts.run(ir);

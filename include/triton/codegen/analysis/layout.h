@@ -101,6 +101,7 @@ public:
                      const std::vector<ir::value*>& values,
                      analysis::align* align);
 
+  virtual int vec_per_thread(size_t k) = 0;
   int shape_per_cta(size_t k) { return shape_per_cta_.at(k); }
   int rep_per_cta(size_t k) { return shape_[k] / shape_per_cta_[k]; }
 
@@ -119,6 +120,7 @@ public:
              shared_layout* layout_b);
   void accept(layout_visitor* vst) { vst->visit_layout_mma(this); }
   // accessor
+  int vec_per_thread(size_t k) { return rep_.at(k); }
   int fpw(size_t k) { return fpw_.at(k); }
   int wpt(size_t k) { return wpt_.at(k); }
   int spw(size_t k) { return spw_.at(k); }
@@ -148,6 +150,7 @@ struct scanline_layout: public distributed_layout {
   // accessor
   int mts(size_t k) { return mts_.at(k); }
   int nts(size_t k) { return nts_.at(k); }
+  int vec_per_thread(size_t k) { return nts_.at(k); }
 
 public:
   // micro tile size. The size of a tile held by a thread block.

@@ -42,6 +42,19 @@ void coalesce::run(ir::module &mod) {
         x->replace_all_uses_with(new_x);
         new_x->replace_uses_of_with(new_x, x);
     }
+    // coalesce before reduce
+    if(auto x = dynamic_cast<ir::reduce_inst*>(i)){
+        std::cout << "reducing" << std::endl;
+      ir::value* op = x->get_operand(0);
+      if(layout_->get(op)->to_mma()){
+          builder.set_insert_point_after((ir::instruction*)op);
+          ir::instruction* new_op = ir::cvt_layout_inst::create(op);
+          builder.insert(new_op);
+          op->replace_all_uses_with(new_op);
+          new_op->replace_uses_of_with(new_op, op);
+      }
+      std::cout << "reduced" << std::endl;
+    }
   }
   for(ir::function *fn: mod.get_function_list())
   for(ir::basic_block *block: fn->blocks())
