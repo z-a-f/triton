@@ -689,6 +689,7 @@ class Kernel:
         return self.fn._warmup(key, arg_types=arg_types, device=device_idx, attributes=attributes, constants=constants, num_warps=num_warps, num_stages=num_stages, is_manual_warmup=False)
 
     def __call__(self, *wargs, grid, num_warps=4, num_stages=2, **kwargs):
+        assert len(grid) <= 3
         # handle arguments passed by name
         kwargs = {self.fn.arg_names.index(name): value for name, value in kwargs.items()}
         wargs = list(wargs)
