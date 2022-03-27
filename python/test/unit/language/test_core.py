@@ -705,11 +705,10 @@ def test_reduce2d(dtype_str, shape, axis, device='cuda'):
 # test permute
 # ---------------
 
-
 @pytest.mark.parametrize("dtype_str, shape, perm",
                          [(dtype, shape, perm)
-                          for dtype in ['float32']
-                             for shape in [(128, 128)]
+                          for dtype in ['float16']
+                             for shape in [(64, 64)]
                              for perm in [(1, 0)]])
 def test_permute(dtype_str, shape, perm, device='cuda'):
 
@@ -720,8 +719,8 @@ def test_permute(dtype_str, shape, perm, device='cuda'):
                BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
         off_m = tl.arange(0, BLOCK_M)
         off_n = tl.arange(0, BLOCK_N)
-        Xs = X + off_m[:, None] * stride_xm + off_n[None, :] * stride_xn
-        Zs = Z + off_m[:, None] * stride_zm + off_n[None, :] * stride_zn
+        Xs = X + off_m[None, :] * stride_xm + off_n[:, None] * stride_xn
+        Zs = Z + off_m[None, :] * stride_zm + off_n[:, None] * stride_zn
         tl.store(Zs, tl.load(Xs))
     # input
     x = numpy_random(shape, dtype_str=dtype_str)
