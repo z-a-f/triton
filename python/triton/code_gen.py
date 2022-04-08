@@ -1230,7 +1230,7 @@ class JITFunction:
         self.bin_cache[key] = LoadedBinary(device, binary)
         return False
 
-    def compile(self, signature):
+    def compile_all(self, signature, constants):
         if signature in self.compiled:
             return
         # First step:
@@ -1239,6 +1239,19 @@ class JITFunction:
         arg_types = [Kernel._to_triton_ir(ty) for ty in signature]
         ret_type = triton.language.void
         prototype = triton.language.function_type(ret_type, arg_types)
+        context = _triton.ir.context()
+        generator = CodeGenerator(context, prototype, gscope=self.__globals__, constants=constants, is_kernel=True)
+        try:
+            generator.visit(self.parse())
+        except Exception as e:
+            node = generator.last_node
+            if node is None or isinstance(e, (NotImplementedError, CompilationError)):
+                raise e
+            raise CompilationError(self.src, node) from e
+        module = generator.module
+        to_specialize = _triton.ir.to_specialize(module)
+
+
 
 
         
