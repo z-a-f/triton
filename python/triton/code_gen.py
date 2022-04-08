@@ -933,6 +933,11 @@ class Kernel:
         cache_key = self.fn.cache_key + cc
         # query current stream
         stream = current_stream(device)
+
+        # sig = _triton.runtime.signature_hash(wargs)
+        # self.fn.compile(sig)
+
+
         return _triton.runtime.launch(wargs, self.fn.do_not_specialize, cache_key, self.fn.arg_names,
                                       device, stream, self.fn.bin_cache, num_warps, num_stages, self.add_to_cache,
                                       grid)
@@ -1224,6 +1229,23 @@ class JITFunction:
 
         self.bin_cache[key] = LoadedBinary(device, binary)
         return False
+
+    def compile(self, signature):
+        if signature in self.compiled:
+            return
+        # First step:
+        # We generate the Triton-IR of a non-specialized kernel
+        # and determine which arguments could benefit from specialization
+        arg_types = [Kernel._to_triton_ir(ty) for ty in signature]
+        ret_type = triton.language.void
+        prototype = triton.language.function_type(ret_type, arg_types)
+
+
+        
+        
+
+
+
 
     def _compile(self, arg_types, device, attributes, constants, num_warps, num_stages):
         # create IR module
