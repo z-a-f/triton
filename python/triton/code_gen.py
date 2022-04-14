@@ -14,6 +14,7 @@ import textwrap
 import time
 import warnings
 from typing import Dict, Set, Tuple, Union
+from rsa import sign
 
 import torch
 from filelock import FileLock
@@ -23,6 +24,28 @@ import triton._C.libtriton.triton as _triton
 from .tools.disasm import extract
 
 current_stream = lambda device: torch.cuda.current_stream(device).cuda_stream
+
+def str_to_ty(name):
+    if name[0] == "*":
+        ty = str_to_ty(name[1:]) 
+        return triton.language.pointer_type(ty)
+    tys = {
+        "fp8": triton.language.float8,
+        "fp16": triton.language.float16,
+        "bf16": triton.language.bfloat16,
+        "fp32": triton.language.float32,
+        "fp64": triton.language.float64,
+        "i8": triton.language.int8,
+        "i16": triton.language.int16,
+        "i32": triton.language.int32,
+        "i64": triton.language.int64,
+        "u8": triton.language.uint8,
+        "u16": triton.language.uint16,
+        "u32": triton.language.uint32,
+        "u64": triton.language.uint64,
+        "B": triton.language.int1,
+    }    
+    return tys[name]
 
 
 def mangle_ty(ty):
@@ -1117,6 +1140,7 @@ class JITFunction:
         self.do_not_specialize = [] if do_not_specialize is None else do_not_specialize
         self.do_not_specialize = [self.arg_names.index(arg) if isinstance(arg, str) else arg for arg in self.do_not_specialize]
         # cache for callable driver objects (e.g. CUkernel)
+        self.compiled = dict()
         self.bin_cache = dict()
         self.hash = None
         # JITFunction can be instantiated as kernel
@@ -1230,17 +1254,22 @@ class JITFunction:
         self.bin_cache[key] = LoadedBinary(device, binary)
         return False
 
-    def compile_all(self, signature, constants):
+    
+
+
+    def compile_all(self, signature):
+        signature = tuple(signature)
         if signature in self.compiled:
             return
         # First step:
         # We generate the Triton-IR of a non-specialized kernel
         # and determine which arguments could benefit from specialization
-        arg_types = [Kernel._to_triton_ir(ty) for ty in signature]
+        arg_types = [str_to_ty(x) for x in signature if isinstance(x, str)]
+        constants = {i: signature[i] for i in self.constexprs}
         ret_type = triton.language.void
         prototype = triton.language.function_type(ret_type, arg_types)
         context = _triton.ir.context()
-        generator = CodeGenerator(context, prototype, gscope=self.__globals__, constants=constants, is_kernel=True)
+        generator = CodeGenerator(context, prototype, gscope=self.__globals__, constants=constants, attributes=dict(), is_kernel=True)
         try:
             generator.visit(self.parse())
         except Exception as e:
@@ -1249,12 +1278,9 @@ class JITFunction:
                 raise e
             raise CompilationError(self.src, node) from e
         module = generator.module
-        to_specialize = _triton.ir.to_specialize(module)
+        # to_specialize = _triton.ir.to_specialize(module)
+        # print(to_specialize)
 
-
-
-
-        
         
 
 
