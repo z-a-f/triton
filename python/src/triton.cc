@@ -551,6 +551,33 @@ void init_triton_ir(py::module &&m) {
   using ret = py::return_value_policy;
   using namespace pybind11::literals;
 
+
+  m.def("to_specialize", [](ir::module& mod){
+    ir::function* fn = mod.get_function_list()[0];
+    std::set<ir::argument*> ret_args;
+    for(ir::argument* arg: fn->args()){
+      std::list<ir::value*> nodes = {arg};
+      std::set<ir::value*> visited;
+      // DFS
+      while(!nodes.empty()){
+        ir::value* curr = nodes.back();
+        nodes.pop_back();
+        if(dynamic_cast<ir::getelementptr_inst*>(curr))
+          ret_args.insert(arg);
+        for(ir::user* usr: curr->get_users())
+          if(visited.insert(usr).second)
+            nodes.push_back(usr);
+      }
+    }
+    std::vector<int> ret;
+    for(ir::argument* arg: ret_args)
+      ret.push_back(arg->get_arg_no());
+    return ret;
+  });
+  
+  
+  
+
   py::enum_<ir::load_inst::CACHE_MODIFIER>(m, "CACHE_MODIFIER")
       .value("NONE", ir::load_inst::NONE)
       .value("CA", ir::load_inst::CA)

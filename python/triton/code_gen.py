@@ -5,6 +5,7 @@ import builtins
 import functools
 import hashlib
 import inspect
+import itertools
 import os
 import pickle
 import subprocess
@@ -1256,20 +1257,16 @@ class JITFunction:
 
     
 
-
-    def compile_all(self, signature):
-        signature = tuple(signature)
-        if signature in self.compiled:
-            return
-        # First step:
-        # We generate the Triton-IR of a non-specialized kernel
-        # and determine which arguments could benefit from specialization
-        arg_types = [str_to_ty(x) for x in signature if isinstance(x, str)]
-        constants = {i: signature[i] for i in self.constexprs}
-        ret_type = triton.language.void
-        prototype = triton.language.function_type(ret_type, arg_types)
+    def do_compile(self, prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only=False):
+        torch.cuda.init()
+        # get backend
+        if torch.version.hip is None:
+            backend = _triton.runtime.backend.CUDA
+        else:
+            backend = _triton.runtime.backend.ROCM
+        # get context
         context = _triton.ir.context()
-        generator = CodeGenerator(context, prototype, gscope=self.__globals__, constants=constants, attributes=dict(), is_kernel=True)
+        generator = CodeGenerator(context, prototype, gscope=self.__globals__, constants=constants, attributes=attributes, is_kernel=True)
         try:
             generator.visit(self.parse())
         except Exception as e:
@@ -1277,9 +1274,49 @@ class JITFunction:
             if node is None or isinstance(e, (NotImplementedError, CompilationError)):
                 raise e
             raise CompilationError(self.src, node) from e
-        module = generator.module
-        # to_specialize = _triton.ir.to_specialize(module)
-        # print(to_specialize)
+        # partial compilation: we return triton-ir early
+        if triton_ir_only:
+            return generator.module
+        name, asm, shared_mem = _triton.code_gen.compile_ttir(backend, generator.module, device, num_warps, num_stages)
+        max_shared_memory = _triton.runtime.max_shared_memory(backend, device)
+        if shared_mem > max_shared_memory:
+            raise OutOfResources(shared_mem, max_shared_memory, "shared memory")
+        return Binary(backend, name, asm, shared_mem, num_warps)
+
+
+    def compile_all(self, signature, num_warps = 4, num_stages = 3, device = None):
+        signature = tuple(signature)
+        if signature in self.compiled:
+            return
+        # Get current device
+        if device is None:
+            device = torch.cuda.current_device()
+        def do_compile(prototype, constants, attributes, triton_ir_only):
+            return self.do_compile(prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only)
+        # First step:
+        # We generate the Triton-IR of a non-specialized kernel
+        # and determine which arguments could benefit from specialization
+        arg_types = [str_to_ty(x) for x in signature if isinstance(x, str)]
+        constants = {i: signature[i] for i in self.constexprs}
+        ret_type = triton.language.void
+        prototype = triton.language.function_type(ret_type, arg_types)
+        module = do_compile(prototype, constants, dict(), triton_ir_only=True)
+        # try out which arguments should actually be specialized
+        specialized_args = _triton.ir.to_specialize(module)
+        # for each argument in the above list, we consider 4 different specialization modes:
+        #   - value equal to 1
+        #   - value multiple of 4
+        #   - Value multiple of 16
+        #   - None of the above
+        modes = {arg: [4, 16, None] for arg in specialized_args}
+        keys, values = zip(*modes.items())
+        # Second step:
+        # Compile all the specified kernels, in parallel
+        for mode in itertools.product(*values):
+            curr_attributes = {keys[i]: attr for i, attr in enumerate(mode) if attr not in [1, None]}
+            curr_constants = constants | {keys[i]: 1 for i, attr in enumerate(mode) if attr == 1}
+            do_compile(prototype, curr_constants, curr_attributes, triton_ir_only=False)
+
 
         
 
