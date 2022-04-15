@@ -15,6 +15,7 @@ import textwrap
 import time
 import warnings
 from typing import Dict, Set, Tuple, Union
+from numpy import isin
 from rsa import sign
 
 import torch
@@ -1293,10 +1294,13 @@ class JITFunction:
             device = torch.cuda.current_device()
         def do_compile(prototype, constants, attributes, triton_ir_only):
             return self.do_compile(prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only)
+        # compute the base hash of the signature
+        arg_types = [x for x in signature if isinstance(x, str)]
+        base_hash = ''.join(arg_types).replace('*','P')
         # First step:
         # We generate the Triton-IR of a non-specialized kernel
         # and determine which arguments could benefit from specialization
-        arg_types = [str_to_ty(x) for x in signature if isinstance(x, str)]
+        arg_types = [str_to_ty(x) for x in arg_types]
         constants = {i: signature[i] for i in self.constexprs}
         ret_type = triton.language.void
         prototype = triton.language.function_type(ret_type, arg_types)
@@ -1315,7 +1319,8 @@ class JITFunction:
         for mode in itertools.product(*values):
             curr_attributes = {keys[i]: attr for i, attr in enumerate(mode) if attr not in [1, None]}
             curr_constants = constants | {keys[i]: 1 for i, attr in enumerate(mode) if attr == 1}
-            do_compile(prototype, curr_constants, curr_attributes, triton_ir_only=False)
+            bin = do_compile(prototype, curr_constants, curr_attributes, triton_ir_only=False)
+            constexpr_hash
 
 
         
