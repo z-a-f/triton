@@ -27,7 +27,8 @@ namespace codegen {
 // There should be a proper pass manager there!
 std::unique_ptr<llvm::Module> add_passes_to_emit_bin(ir::module &ir, llvm::LLVMContext& ctx, codegen::target* target,
                                                      int cc, int num_warps, int num_stages, int& shared_static,
-                                                     std::unique_ptr<analysis::layouts>* last_layouts) {
+                                                     std::unique_ptr<analysis::layouts>* last_layouts,
+                                                     std::unique_ptr<analysis::align>* last_align) {
   // generate llvm code
   std::string name = ir.get_function_list()[0]->get_name();
   std::unique_ptr<llvm::Module> llvm(new llvm::Module(name, ctx));
@@ -93,6 +94,8 @@ std::unique_ptr<llvm::Module> add_passes_to_emit_bin(ir::module &ir, llvm::LLVMC
   shared_static = allocation.allocated_size();
   if(last_layouts)
       last_layouts->reset(new codegen::analysis::layouts(layouts));
+  if(last_align)
+      last_align->reset(new codegen::analysis::align(align));
   return llvm;
 }
 

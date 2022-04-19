@@ -701,14 +701,14 @@ void init_triton_ir(py::module &&m) {
     int cc = 70;
     triton::codegen::nvidia_cu_target target(cc);
     std::unique_ptr<triton::codegen::analysis::layouts> layouts;
+    std::unique_ptr<triton::codegen::analysis::align> align;
     int n_shared_bytes;
     llvm::LLVMContext ctx;
-    triton::codegen::add_passes_to_emit_bin(mod, ctx, &target, cc, 4, 2, n_shared_bytes, &layouts);
+    triton::codegen::add_passes_to_emit_bin(mod, ctx, &target, cc, 4, 2, n_shared_bytes, &layouts, &align);
     std::vector<std::set<int>> ret;
     // all the kernel arguments tied to the same getelementptr layout belong
     // in the same group
     for(int i = 0; i < layouts->num_layouts(); i++){
-      std::cout << "-----------------" << std::endl;
       std::vector<ir::value*> vals = layouts->get(i)->get_values();
       // we will specialize arguments that are reachable (via BFS)
       // from all `getelementptr` instructions in this layout
@@ -729,6 +729,8 @@ void init_triton_ir(py::module &&m) {
         if(auto* usr = dynamic_cast<ir::user*>(curr))
           ops = usr->ops();
         for(ir::value* op: ops){
+          if(!visited.insert(op).second)
+            continue;
           // we only propagate through
           // instruction: no multiple_of override and bin_op/reshape/splat/broadcast
           // argument
@@ -740,7 +742,8 @@ void init_triton_ir(py::module &&m) {
                               id == ir::INST_SPLAT  || id == ir::INST_BROADCAST;
             // setting the downstream arguments as multiple of 16 only matters
             // if the compiler doesn't already know that said value is multiple of 16
-            if(is_valid_id && instr->get_metadata(ir::metadata::multiple_of) < 16)
+            auto multiples = align->starting_multiple(instr);
+            if(is_valid_id && multiples.size() != 1 || multiples[0] < 16)
               queue.push_back(op);
           }
           if(arg)
@@ -754,7 +757,6 @@ void init_triton_ir(py::module &&m) {
       for(ir::argument* arg: to_specialize)
         curr.insert(arg->get_arg_no());
       ret.push_back(curr);
-      std::cout << "-----------------" << std::endl;
     }
     return ret;
     
