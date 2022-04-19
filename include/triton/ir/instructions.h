@@ -61,6 +61,7 @@ public:
   void set_metadata(ir::metadata::kind_t kind,
                     unsigned value)                           { metadatas_[kind] = value;}
   unsigned get_metadata(ir::metadata::kind_t kind)            { return metadatas_[kind];}
+  bool has_metadata(ir::metadata::kind_t kind)                { return metadatas_.find(kind) != metadatas_.end(); }
   // cloning
   ir::instruction* clone() {
     ir::instruction* res = clone_impl();

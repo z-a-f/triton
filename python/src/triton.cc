@@ -1,5 +1,7 @@
 ﻿#include "triton/codegen/pass.h"
 #include "triton/codegen/target.h"
+#include "triton/codegen/analysis/layout.h"
+#include "triton/codegen/analysis/align.h"
 #include "triton/driver/error.h"
 #include "triton/driver/llvm.h"
 #include "triton/ir/builder.h"
@@ -105,9 +107,9 @@ void hip_enqueue(uint64_t stream, uint64_t kernel,
 
 long pow2_divisor(long N){
     if(N % 16 == 0) return 16;
-    if(N % 8 == 0) return 8;
-    if(N % 4 == 0) return 4;
-    if(N % 2 == 0) return 2;
+    // if(N % 8 == 0) return 8;
+    // if(N % 4 == 0) return 4;
+    // if(N % 2 == 0) return 2;
     return 1;
 }
 
@@ -136,6 +138,144 @@ size_t get_pointer_range_size(uint64_t addr){
   drv::dispatch::cuPointerGetAttribute(&size, CU_POINTER_ATTRIBUTE_RANGE_SIZE, (CUdeviceptr)addr);
   return size;
 }
+
+
+
+// Parse arguments
+std::tuple<std::string, std::string, std::string, std::string, size_t> parse_args2(py::list& args) {
+    size_t len = PyList_Size(args.ptr());
+    std::string params;
+    params.reserve(8*len); // 8 max bytes by argument
+    char* params_ptr = &params[0];
+    std::string hash_sig; // signature hash
+    std::string hash_attrs; // attributes hash
+    std::string hash_constexprs; // constexprs hash
+
+    for(int i = 0; i < len; i++){
+      py::int_ py_i = py::int_(i);
+      // bool specialize = !do_not_specialize.contains(py_i);
+      bool specialize = true;
+      py::object arg = args[i];
+      auto arg_ptr = arg.ptr();
+      // ------------------
+      // argument is `long`
+      if(PyLong_Check(arg_ptr)){
+        int overflow;
+        long long value = PyLong_AsLongLongAndOverflow(arg_ptr, &overflow);
+        // values equal to 1 are specialized
+        if(specialize && (value == 1)){
+          hash_constexprs += "_";
+          hash_constexprs += std::to_string(i);
+          hash_constexprs += "c1";
+          continue;
+        }
+        // int32, uint32, int64, and uint64 have different kernels
+        if (!overflow && -0x8000'0000LL <= value && value <= 0x7FFF'FFFFLL) {
+          hash_sig += "int32";
+          params_ptr = (char*)(((uintptr_t)params_ptr + 3) & (-4));
+          std::memcpy(params_ptr, &value, 4);
+          params_ptr += 4;
+        } else if (!overflow && 0x8000'0000LL <= value && value <= 0xFFFF'FFFFLL) {
+          hash_sig += "uint32";
+          params_ptr = (char*)(((uintptr_t)params_ptr + 3) & (-4));
+          std::memcpy(params_ptr, &value, 4);
+          params_ptr += 4;
+        } else if (!overflow) {
+          hash_sig += "int64";
+          params_ptr = (char*)(((uintptr_t)params_ptr + 7) & (-8));
+          std::memcpy(params_ptr, &value, 8);
+          params_ptr += 8;
+        } else {
+          if (PyErr_Occurred()) {
+            throw std::logic_error("An error occurred?");
+          }
+          unsigned long long unsigned_value = PyLong_AsUnsignedLongLong(arg_ptr);
+          if (PyErr_Occurred()) {
+            throw std::runtime_error("integer overflow in argument: " + std::string(py::str(arg)));
+          }
+          hash_sig += "uint64";
+          params_ptr = (char*)(((uintptr_t)params_ptr + 7) & (-8));
+          std::memcpy(params_ptr, &unsigned_value, 8);
+          params_ptr += 8;
+        }
+        // handle multiple-of specialization
+        if(specialize && (value % 16 == 0)){
+          // values divisible by small powers of 2 are specialized
+          hash_attrs += "_";
+          hash_attrs += std::to_string(i);
+          hash_attrs += "a";
+          hash_attrs += std::to_string(pow2_divisor(value));
+        }
+        continue;
+      }
+      // argument is `float`
+      if(PyFloat_Check(arg_ptr)){
+        hash_sig += "float32";
+        float value = PyFloat_AsDouble(arg_ptr);
+        params_ptr = (char*)(((uintptr_t)params_ptr + 3) & (-4));
+        std::memcpy(params_ptr, &value, 4);
+        params_ptr += 4;
+        continue;
+      }
+      // argument is `bool`
+      if(PyBool_Check(arg_ptr)){
+        hash_sig += "bool";
+        bool value =  arg_ptr == Py_True ? true : false;
+        std::memcpy(params_ptr, &value, 1);
+        params_ptr += 1;
+        continue;
+      }
+      // argument is tensor
+      if(py::hasattr(arg, "data_ptr")){
+        py::object data_ptr = arg.attr("data_ptr")();
+        size_t value = data_ptr.cast<size_t>();
+        params_ptr = (char*)(((uintptr_t)params_ptr + 7) & (-8));
+        // copy param
+        std::memcpy(params_ptr, &value, 8);
+        params_ptr += 8;
+        // signature
+        hash_sig += "*";
+        hash_sig += dtype_cache_key_part(arg.attr("dtype"));
+        // pointer attribute
+        size_t range_size = get_pointer_range_size(value);
+        size_t alignment = std::min(value, range_size);
+        if(specialize && (alignment % 16 == 0)){
+          hash_attrs += "_";
+          hash_attrs += std::to_string(i);
+          hash_attrs += "a";
+          hash_attrs += std::to_string(std::min(pow2_divisor(value), pow2_divisor(range_size)));
+        }
+        continue;
+      }
+      // argument is `constexpr`
+      if(py::hasattr(arg, "value")){
+        py::object value = arg.attr("value");
+        py::object repr = py::repr(value);
+        const char* start = (const char*)PyUnicode_1BYTE_DATA(repr.ptr());
+        size_t len = PyUnicode_GET_LENGTH(repr.ptr());
+        hash_constexprs += "_";
+        hash_constexprs += std::to_string(i);
+        hash_constexprs += "c";
+        hash_constexprs += std::string(start, len);
+        continue;
+      }
+      std::string ty_str = arg.attr("__class__").attr("__name__").cast<std::string>();
+      if(ty_str == "NoneType"){
+        hash_constexprs += "_";
+        hash_constexprs += std::to_string(i);
+        hash_constexprs += "c";
+        hash_constexprs += "None";
+        continue;
+      }
+      std::string err_msg = "Received type '" + ty_str + "' for argument " + std::to_string(i) + "."
+                            + " Only int, float, bool, torch.Tensor, and triton.language.constexpr are supported.";
+      throw std::runtime_error(err_msg);
+    }
+    size_t params_size = (std::ptrdiff_t)(params_ptr - &params[0]);
+    return std::make_tuple(hash_sig, hash_attrs, hash_constexprs, params, params_size);
+}
+
+
 
 // Launch
 void parse_args(py::list& args, py::list do_not_specialize, const std::string& func_key, py::list& arg_names,
@@ -283,6 +423,7 @@ void init_triton_runtime(py::module &&m) {
 
   // get range size for the given pointer
   m.def("get_pointer_range_size", &get_pointer_range_size);
+  m.def("parse_args2", &parse_args2);
 
 
   // cache key
@@ -467,7 +608,6 @@ std::tuple<uint64_t, uint64_t> hip_load_binary(const std::string& name, asm_map_
 std::tuple<std::string, asm_map_t, int> cu_compile_ttir(const std::string& name, ir::module &ir, 
                                                                uint64_t device, int num_warps, int num_stages,
                                                                asm_map_t &asm_map){
-
   int n_shared_bytes;
   py::gil_scoped_release allow_threads;
   llvm::LLVMContext ctx;
@@ -553,26 +693,71 @@ void init_triton_ir(py::module &&m) {
 
 
   m.def("to_specialize", [](ir::module& mod){
-    ir::function* fn = mod.get_function_list()[0];
-    std::set<ir::argument*> ret_args;
-    for(ir::argument* arg: fn->args()){
-      std::list<ir::value*> nodes = {arg};
+    py::gil_scoped_release allow_threads;
+    // technically we don't need to run the full analysis here
+    // future rewrite of the backend will make it easier to only run what's
+    // necessary to get layout information
+    // note: compute capability, num warps and num stages doens't matter here.
+    int cc = 70;
+    triton::codegen::nvidia_cu_target target(cc);
+    std::unique_ptr<triton::codegen::analysis::layouts> layouts;
+    int n_shared_bytes;
+    llvm::LLVMContext ctx;
+    triton::codegen::add_passes_to_emit_bin(mod, ctx, &target, cc, 4, 2, n_shared_bytes, &layouts);
+    std::vector<std::set<int>> ret;
+    // all the kernel arguments tied to the same getelementptr layout belong
+    // in the same group
+    for(int i = 0; i < layouts->num_layouts(); i++){
+      std::cout << "-----------------" << std::endl;
+      std::vector<ir::value*> vals = layouts->get(i)->get_values();
+      // we will specialize arguments that are reachable (via BFS)
+      // from all `getelementptr` instructions in this layout
+      std::vector<ir::value*> queue;
+      std::set<ir::argument*> to_specialize;
       std::set<ir::value*> visited;
-      // DFS
-      while(!nodes.empty()){
-        ir::value* curr = nodes.back();
-        nodes.pop_back();
-        if(dynamic_cast<ir::getelementptr_inst*>(curr))
-          ret_args.insert(arg);
-        for(ir::user* usr: curr->get_users())
-          if(visited.insert(usr).second)
-            nodes.push_back(usr);
+      // initialize queue
+      for(ir::value* v: vals)
+      if(auto* gep = dynamic_cast<ir::getelementptr_inst*>(v))
+        queue.push_back(gep);
+      // BFS
+      while(!queue.empty()){
+        ir::value* curr = queue.back();
+        if(auto* arg = dynamic_cast<ir::argument*>(curr))
+          to_specialize.insert(arg);
+        queue.pop_back();
+        std::vector<ir::value*> ops;
+        if(auto* usr = dynamic_cast<ir::user*>(curr))
+          ops = usr->ops();
+        for(ir::value* op: ops){
+          // we only propagate through
+          // instruction: no multiple_of override and bin_op/reshape/splat/broadcast
+          // argument
+          ir::instruction* instr = dynamic_cast<ir::instruction*>(op);
+          ir::argument* arg = dynamic_cast<ir::argument*>(op);
+          if(instr){
+            auto id = instr->get_id();
+            bool is_valid_id = id == ir::INST_BINOP || id == ir::INST_RESHAPE ||
+                              id == ir::INST_SPLAT  || id == ir::INST_BROADCAST;
+            // setting the downstream arguments as multiple of 16 only matters
+            // if the compiler doesn't already know that said value is multiple of 16
+            if(is_valid_id && instr->get_metadata(ir::metadata::multiple_of) < 16)
+              queue.push_back(op);
+          }
+          if(arg)
+            queue.push_back(op);
+        }
       }
+      if(to_specialize.empty())
+        continue;
+      // do some post-processing on `to_specialize`
+      std::set<int> curr;
+      for(ir::argument* arg: to_specialize)
+        curr.insert(arg->get_arg_no());
+      ret.push_back(curr);
+      std::cout << "-----------------" << std::endl;
     }
-    std::vector<int> ret;
-    for(ir::argument* arg: ret_args)
-      ret.push_back(arg->get_arg_no());
     return ret;
+    
   });
   
   

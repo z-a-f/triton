@@ -911,27 +911,6 @@ class Kernel:
     def __init__(self, fn):
         self.fn = fn
 
-    def add_to_cache(self, key, wargs, device_idx, num_warps, num_stages):
-        tensor_idxs = [i for i, arg in enumerate(wargs) if hasattr(arg, 'data_ptr')]
-
-        # attributes
-        attributes = dict()
-        for i, arg in enumerate(wargs):
-            if i in self.fn.do_not_specialize:
-                continue
-            if isinstance(arg, int):
-                attributes[i] = Kernel.pow2_divisor(arg)
-            elif i in tensor_idxs:
-                addr = arg.data_ptr()
-                range_size = _triton.runtime.get_pointer_range_size(addr)
-                attributes[i] = min(Kernel.pow2_divisor(addr),
-                                    Kernel.pow2_divisor(range_size))
-        # transforms ints whose value is one into constants for just-in-time compilation
-        constants = {i: arg for i, arg in enumerate(wargs) if isinstance(arg, int) and arg == 1 and i not in self.fn.do_not_specialize}
-        constants.update({i: arg.value for i, arg in enumerate(wargs) if isinstance(arg, triton.language.constexpr)})
-        constants.update({i: None for i, arg in enumerate(wargs) if arg is None})
-        arg_types = [Kernel._to_python_ir(arg) for i, arg in enumerate(wargs) if i not in constants]
-        return self.fn._warmup(key, arg_types=arg_types, device=device_idx, attributes=attributes, constants=constants, num_warps=num_warps, num_stages=num_stages, is_manual_warmup=False)
 
     def __call__(self, *wargs, grid, num_warps=4, num_stages=2, **kwargs):
         # handle arguments passed by name
@@ -952,12 +931,19 @@ class Kernel:
         # set device (i.e., make sure torch has the context initialized)
         device = torch.cuda.current_device()
         torch.cuda.set_device(device)
-        # query compute capability
-        cc = torch.cuda.get_device_capability(device)
-        cc = str(cc[0]) + '-' + str(cc[1])
-        cache_key = self.fn.cache_key + cc
         # query current stream
         stream = current_stream(device)
+        # we parse the arguments here. This is done in C++ for minimal latency
+        hash_sig, hash_attrs, hash_consts, args, args_size = _triton.runtime.parse_args2(wargs)
+        hash = hash_sig + hash_attrs + hash_consts
+        binary = self.fn.cache_manager.get(hash)
+        if binary is None:
+            print(hash_sig)
+            print(hash_attrs)
+            print(hash_consts)
+            binary = self.fn.compile(sig, attrs=attrs, consts=consts, num_warps=num_warps, num_stages=num_stages)
+            self.fn.cache_manager.add(hash, binary)
+        
 
         # sig = _triton.runtime.signature_hash(wargs)
         # self.fn.compile(sig)
@@ -1122,6 +1108,47 @@ class DependenciesFinder(ast.NodeVisitor):
         self.ret = (self.ret + func.hash).encode("utf-8")
         self.ret = hashlib.md5(self.ret).hexdigest()
 
+class CacheManager:
+
+    def __init__(self, base_hash):
+        self.base_hash = base_hash
+        self.loaded = dict()
+        # device prefix
+        cc = torch.cuda.get_device_capability(torch.cuda.current_device)
+        arch = f"sm{cc[0]}{cc[1]}"
+        self.cache_dir = os.environ.get('TRITON_CACHE_DIR', '/tmp/triton/')
+        self.cache_dir = os.path.join(self.cache_dir, self.base_hash, arch)
+        if self.cache_dir:
+            os.makedirs(self.cache_dir, exist_ok=True)
+    
+    def get(self, key):
+        # check for binary in RAM cache
+        # ------------------------------
+        if key in self.loaded:
+            return self.loaded[key]
+        # check for binary in disk cache
+        # ------------------------------
+        bin_cache_path = os.path.join(self.cache_dir, key)
+        bin_lock_path = bin_cache_path + ".lock"
+        if os.path.exists(bin_cache_path):
+            assert bin_lock_path is not None
+            with FileLock(bin_lock_path):
+                with open(bin_cache_path, 'rb') as f:
+                    binary = pickle.load(f)["binary"]
+                    self.loaded[key] = binary
+                    return binary
+        # key doesn't exist -- return None
+        return None
+            
+    
+    def add(self, key, binary):
+        bin_cache_path = os.path.join(self.cache_dir, key)
+        bin_lock_path = bin_cache_path + ".lock"
+        # store the compiled binary on the disk
+        with FileLock(bin_lock_path):
+            with open(bin_cache_path + ".tmp", "wb") as f:
+                pickle.dump({"binary": binary, "key": key}, f)
+            os.rename(bin_cache_path + ".tmp", bin_cache_path)
 
 class JITFunction:
 
@@ -1142,9 +1169,7 @@ class JITFunction:
         self.do_not_specialize = [] if do_not_specialize is None else do_not_specialize
         self.do_not_specialize = [self.arg_names.index(arg) if isinstance(arg, str) else arg for arg in self.do_not_specialize]
         # cache for callable driver objects (e.g. CUkernel)
-        self.compiled = dict()
-        self.bin_cache = dict()
-        self.hash = None
+        self._cache_manager = None
         # JITFunction can be instantiated as kernel
         # when called with a grid using __getitem__
         self.kernel_decorators = []
@@ -1162,13 +1187,14 @@ class JITFunction:
 
     @property
     @functools.lru_cache()
-    def cache_key(self):
+    def cache_manager(self):
         # TODO : hash should be attribute of `self`
-        if self.hash is None:
+        if self._cache_manager is None:
             dependencies_finder = DependenciesFinder(globals=self.__globals__, src=self.src)
             dependencies_finder.visit(self.parse())
-            self.hash = dependencies_finder.ret + version_key()
-        return self.hash
+            hash = dependencies_finder.ret + version_key()
+            self._cache_manager = CacheManager(hash)
+        return self._cache_manager
 
     # we do not parse `src` in the constructor because
     # the user might want to monkey-patch self.src dynamically.
@@ -1192,8 +1218,8 @@ class JITFunction:
             self.kernel = None
         super(JITFunction, self).__setattr__(name, value)
         if name == 'src':
-            self.hash = None
-            JITFunction.cache_key.fget.cache_clear()
+            self._cache_manager = None
+            JITFunction.cache_manager.fget.cache_clear()
 
     def _init_kernel(self):
         if self.kernel is None:
@@ -1202,63 +1228,10 @@ class JITFunction:
                 self.kernel = decorator(self.kernel)
         return self.kernel
 
-    def warmup(self, compile):
-        return self._warmup(**compile, is_manual_warmup=True)
-
-    def _warmup(self, key, arg_types, device, attributes, constants, num_warps, num_stages, is_manual_warmup):
-        hashed_key = hashlib.md5(key.encode("utf-8")).hexdigest()
-
-        # create cache directory
-        cache_dir = os.environ.get('TRITON_CACHE_DIR', '/tmp/triton/')
-        if cache_dir:
-            os.makedirs(cache_dir, exist_ok=True)
-
-        if cache_dir:
-            bin_cache_path = os.path.join(cache_dir, hashed_key)
-            bin_lock_path = bin_cache_path + ".lock"
-        else:
-            bin_cache_path = None
-            bin_lock_path = None
-
-        binary = None
-        if bin_cache_path and os.path.exists(bin_cache_path):
-            assert bin_lock_path is not None
-            with FileLock(bin_lock_path):
-                with open(bin_cache_path, 'rb') as f:
-                    binary = pickle.load(f)["binary"]
-
-        compile = dict(arg_types=arg_types, device=device, attributes=attributes, constants=constants, num_warps=num_warps, num_stages=num_stages)
-        if JITFunction.cache_hook is not None:
-            name = self.__name__
-            info = key.split('-')[-3:]
-            num_warps, num_stages, sig = info[0], info[1], info[2].split('_')[1:]
-            # make signature human-readable
-            arg_reprs = []
-            for arg_name, arg_sig in zip(self.arg_names, sig):
-                arg_reprs.append(f'{arg_name}: {arg_sig}')
-            # assemble the repr
-            arg_reprs = ", ".join(arg_reprs)
-            repr = f"{name}[num_warps={num_warps}, num_stages={num_stages}]({arg_reprs})"
-            noop = JITFunction.cache_hook(key=key, repr=repr, fn=self, compile={"key": key, **compile}, is_manual_warmup=is_manual_warmup, already_compiled=binary is not None)
-            if noop:
-                return True
-
-        if binary is None:
-            binary = self._compile(**compile)
-
-        if bin_cache_path:
-            assert bin_lock_path is not None
-            with FileLock(bin_lock_path):
-                with open(bin_cache_path + ".tmp", "wb") as f:
-                    pickle.dump({"binary": binary, "key": key}, f)
-                os.rename(bin_cache_path + ".tmp", bin_cache_path)
-
-        self.bin_cache[key] = LoadedBinary(device, binary)
-        return False
-
     
-
-    def do_compile(self, prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only=False):
+        
+        
+    def _compile(self, prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only=False):
         torch.cuda.init()
         # get backend
         if torch.version.hip is None:
@@ -1267,7 +1240,7 @@ class JITFunction:
             backend = _triton.runtime.backend.ROCM
         # get context
         context = _triton.ir.context()
-        generator = CodeGenerator(context, prototype, gscope=self.__globals__, constants=constants, attributes=attributes, is_kernel=True)
+        generator = CodeGenerator(context, prototype, gscope=self.__globals__.copy(), constants=constants, attributes=attributes, is_kernel=True)
         try:
             generator.visit(self.parse())
         except Exception as e:
@@ -1277,7 +1250,7 @@ class JITFunction:
             raise CompilationError(self.src, node) from e
         # partial compilation: we return triton-ir early
         if triton_ir_only:
-            return generator.module
+            return context, generator
         name, asm, shared_mem = _triton.code_gen.compile_ttir(backend, generator.module, device, num_warps, num_stages)
         max_shared_memory = _triton.runtime.max_shared_memory(backend, device)
         if shared_mem > max_shared_memory:
@@ -1285,15 +1258,13 @@ class JITFunction:
         return Binary(backend, name, asm, shared_mem, num_warps)
 
 
-    def compile_all(self, signature, num_warps = 4, num_stages = 3, device = None):
+    def compile(self, signature, num_warps = 4, num_stages = 3, device = None):
         signature = tuple(signature)
-        if signature in self.compiled:
-            return
         # Get current device
         if device is None:
             device = torch.cuda.current_device()
-        def do_compile(prototype, constants, attributes, triton_ir_only):
-            return self.do_compile(prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only)
+        def _compile(prototype, constants, attributes, triton_ir_only):
+            return self._compile(prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only)
         # compute the base hash of the signature
         arg_types = [x for x in signature if isinstance(x, str)]
         base_hash = ''.join(arg_types).replace('*','P')
@@ -1304,58 +1275,36 @@ class JITFunction:
         constants = {i: signature[i] for i in self.constexprs}
         ret_type = triton.language.void
         prototype = triton.language.function_type(ret_type, arg_types)
-        module = do_compile(prototype, constants, dict(), triton_ir_only=True)
+        context, generator = _compile(prototype, constants, dict(), triton_ir_only=True)
         # try out which arguments should actually be specialized
-        specialized_args = _triton.ir.to_specialize(module)
+        # name, asm, shared_mem = _triton.code_gen.compile_ttir(_triton.runtime.backend.CUDA, generator.module, device, num_warps, num_stages)
+        specialized_args = _triton.ir.to_specialize(generator.module)
+        print(specialized_args)
+        # print([self.arg_names[i] for i in specialized_args])
+        exit()
         # for each argument in the above list, we consider 4 different specialization modes:
         #   - value equal to 1
         #   - value multiple of 4
         #   - Value multiple of 16
         #   - None of the above
-        modes = {arg: [4, 16, None] for arg in specialized_args}
+        modes = {arg: [1, 16, None] for arg in specialized_args}
         keys, values = zip(*modes.items())
         # Second step:
         # Compile all the specified kernels, in parallel
         for mode in itertools.product(*values):
             curr_attributes = {keys[i]: attr for i, attr in enumerate(mode) if attr not in [1, None]}
             curr_constants = constants | {keys[i]: 1 for i, attr in enumerate(mode) if attr == 1}
-            bin = do_compile(prototype, curr_constants, curr_attributes, triton_ir_only=False)
-            constexpr_hash
-
-
+            curr_attributes = dict(sorted(curr_attributes.items()))
+            curr_constants = dict(sorted(curr_constants.items()))
+            attr_hash = ''
+            for idx, val in sorted(curr_attributes.items()):
+                attr_hash += f'_{idx}a{val}'
+            constexpr_hash = ''
+            for idx, val in sorted(curr_constants.items()):
+                constexpr_hash += f'_{idx}c{val}'
+            hash = f"{base_hash}{attr_hash}{constexpr_hash}"
+            self.kernels[hash] = _compile(prototype, curr_constants, curr_attributes, triton_ir_only=False)
         
-
-
-
-
-    def _compile(self, arg_types, device, attributes, constants, num_warps, num_stages):
-        # create IR module
-        context = _triton.ir.context()
-        # get just-in-time proto-type of kernel
-        arg_types = [Kernel._to_triton_ir(arg) for arg in arg_types]
-        ret_type = triton.language.void
-        prototype = triton.language.function_type(ret_type, arg_types)
-        # generate Triton-IR
-        # export symbols visible from self into code-generator object
-        gscope = self.__globals__
-        generator = CodeGenerator(context, prototype, gscope=gscope, attributes=attributes, constants=constants, is_kernel=True)
-        try:
-            generator.visit(self.parse())
-        except Exception as e:
-            node = generator.last_node
-            if node is None or isinstance(e, (NotImplementedError, CompilationError)):
-                raise e
-            raise CompilationError(self.src, node) from e
-        # Compile to machine code
-        if torch.version.hip is None:
-            backend = _triton.runtime.backend.CUDA
-        else:
-            backend = _triton.runtime.backend.ROCM
-        name, asm, shared_mem = _triton.code_gen.compile_ttir(backend, generator.module, device, num_warps, num_stages)
-        max_shared_memory = _triton.runtime.max_shared_memory(backend, device)
-        if shared_mem > max_shared_memory:
-            raise OutOfResources(shared_mem, max_shared_memory, "shared memory")
-        return Binary(backend, name, asm, shared_mem, num_warps)
 
     def __getitem__(self, grid):
         return Launcher(self._init_kernel(), grid)

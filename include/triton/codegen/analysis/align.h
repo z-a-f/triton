@@ -65,6 +65,7 @@ public:
   void run(ir::module &mod);
   unsigned get(ir::value* v, unsigned ax) const;
   std::vector<unsigned> contiguous(ir::value* v) const;
+  std::vector<unsigned> starting_multiple(ir::value* v) const { return starting_multiple_.at(v); }
 
 private:
   std::map<ir::value*, std::vector<cst_info>> is_constant_;
