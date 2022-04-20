@@ -1277,7 +1277,9 @@ class JITFunction:
         prototype = triton.language.function_type(ret_type, arg_types)
         context, generator = _compile(prototype, constants, dict(), triton_ir_only=True)
         # try out which arguments should actually be specialized
-        # name, asm, shared_mem = _triton.code_gen.compile_ttir(_triton.runtime.backend.CUDA, generator.module, device, num_warps, num_stages)
+        # specialize_args is a List[Set], where each Set denotes
+        # a set of arguments that are tied together -- ie correspond to pointers
+        # and strides of some tensors
         specialized_args = _triton.ir.to_specialize(generator.module)
         print(specialized_args)
         # print([self.arg_names[i] for i in specialized_args])
