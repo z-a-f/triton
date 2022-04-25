@@ -15,8 +15,6 @@ import textwrap
 import time
 import warnings
 from typing import Dict, Set, Tuple, Union
-from numpy import isin
-from rsa import sign
 
 import torch
 from filelock import FileLock
@@ -1258,21 +1256,20 @@ class JITFunction:
         return Binary(backend, name, asm, shared_mem, num_warps)
 
 
-    def compile(self, signature, num_warps = 4, num_stages = 3, device = None):
-        signature = tuple(signature)
+    def compile(self, signature, constants, num_warps = 4, num_stages = 3, device = None):
         # Get current device
         if device is None:
             device = torch.cuda.current_device()
         def _compile(prototype, constants, attributes, triton_ir_only):
             return self._compile(prototype, constants, attributes, device, num_warps, num_stages, triton_ir_only)
         # compute the base hash of the signature
-        arg_types = [x for x in signature if isinstance(x, str)]
+        arg_types = signature.replace(' ','').split(',')
+        constants = {self.arg_names.index(name): value for name, value in constants.items()}
         base_hash = ''.join(arg_types).replace('*','P')
         # First step:
         # We generate the Triton-IR of a non-specialized kernel
         # and determine which arguments could benefit from specialization
         arg_types = [str_to_ty(x) for x in arg_types]
-        constants = {i: signature[i] for i in self.constexprs}
         ret_type = triton.language.void
         prototype = triton.language.function_type(ret_type, arg_types)
         context, generator = _compile(prototype, constants, dict(), triton_ir_only=True)
