@@ -39,33 +39,18 @@ def kernel_nospec(X, i, BLOCK: tl.constexpr):
     tl.store(X, i)
 
 
-def apply_src_change(target, old, new):
+def test_nested1_change():
+    baseline = kernel.cache_key
+    # reset all hash
     kernel.hash = None
     function_1.hash = None
     function_2.hash = None
-    function_1.src = function_1.src.replace(old, new)
-    target.src = target.src.replace(old, new)
-    ret = target.cache_key
-    target.src = target.src.replace(new, old)
-    return ret
+    # change the source code of function_1
+    function_1.src = function_1.src.replace('i + 1', 'i + 2')
+    # check that the hash of top-level function actually changed
+    new_key = kernel.cache_key
+    assert baseline != new_key
 
-
-def test_nochange():
-    baseline = kernel.cache_key
-    updated = apply_src_change(kernel, 'i + 1', 'i + 1')
-    assert baseline == updated
-
-
-def test_toplevel_change():
-    baseline = kernel.cache_key
-    updated = apply_src_change(kernel, 'i + 1', 'i + 2')
-    assert baseline != updated
-
-
-def test_nested1_change():
-    baseline = kernel.cache_key
-    updated = apply_src_change(function_1, 'i + 1', 'i + 2')
-    assert baseline != updated
 
 
 def reset_tmp_dir():
